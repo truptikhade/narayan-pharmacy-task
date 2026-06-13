@@ -8,9 +8,11 @@ load_dotenv()
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
+# Toggle for local testing without API credits
+USE_MOCK = os.getenv("USE_MOCK_AI", "False") == "True"
+
 
 def normalize_combination(drugs):
-    """Create a consistent key for caching, regardless of order."""
     names = sorted([f"{d['name'].strip().lower()}_{d['dosage'].strip().lower()}" for d in drugs])
     return "|".join(names)
 
@@ -36,8 +38,44 @@ Respond ONLY with valid JSON, no markdown formatting, in this exact structure:
 If no significant interactions exist, return has_interaction: false, severity: "None", interactions: [], and a brief recommendation confirming it's safe to dispense."""
 
 
+def mock_response(drugs):
+    """Fake Claude response for local testing without API credits."""
+    drug_names = [d["name"].lower() for d in drugs]
+
+    # A couple of hardcoded "realistic" scenarios for demo purposes
+    if "metformin" in drug_names and "lisinopril" in drug_names:
+        return {
+            "has_interaction": True,
+            "severity": "Mild",
+            "interactions": [
+                "Lisinopril may slightly enhance the blood-sugar-lowering effect of Metformin."
+            ],
+            "recommendation": "Monitor blood glucose levels periodically. No dose adjustment usually required.",
+            "cached": False,
+        }
+
+    if "warfarin" in drug_names and "aspirin" in drug_names:
+        return {
+            "has_interaction": True,
+            "severity": "Severe",
+            "interactions": [
+                "Combining Warfarin with Aspirin significantly increases the risk of bleeding."
+            ],
+            "recommendation": "Avoid this combination if possible. If necessary, monitor INR closely and watch for signs of bleeding.",
+            "cached": False,
+        }
+
+    # Default — no known interaction in our mock dataset
+    return {
+        "has_interaction": False,
+        "severity": "None",
+        "interactions": [],
+        "recommendation": "No significant interactions found between the listed medications.",
+        "cached": False,
+    }
+
+
 def check_interactions(drugs):
-    # Edge case: only 1 drug — skip API call entirely
     if len(drugs) < 2:
         return {
             "has_interaction": False,
@@ -51,14 +89,19 @@ def check_interactions(drugs):
 
     combo_key = normalize_combination(drugs)
 
-    # Check cache first
     cached = InteractionCache.objects.filter(drug_combination=combo_key).first()
     if cached:
         result = cached.result
         result["cached"] = True
         return result
 
-    # Call Claude API
+    # ── MOCK MODE ──────────────────────────────────────
+    if USE_MOCK:
+        result = mock_response(drugs)
+        InteractionCache.objects.create(drug_combination=combo_key, result=result)
+        return result
+    # ─────────────────────────────────────────────────────
+
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -72,9 +115,7 @@ def check_interactions(drugs):
         result = json.loads(result_text)
         result["cached"] = False
 
-        # Save to cache
         InteractionCache.objects.create(drug_combination=combo_key, result=result)
-
         return result
 
     except anthropic.APIError as e:
